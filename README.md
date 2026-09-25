@@ -1,10 +1,12 @@
 # Monocular Gate Perception with Course Memory for Autonomous Drone Racing
 
-**CSE 60535 Graduate Computer Vision, Fall 2026: Semester Project, Part 1 (Conceptual Design)**
+**CSE 60535 Graduate Computer Vision, Fall 2026: Semester Project**
 Author(s): Jonathan Granda Acaro
 Platform: AI Grand Prix virtual qualifier simulator (spec VADR-TS-003, issue 00.03)
 
 ---
+
+# Semester Project, Part 1 (Conceptual Design)
 
 ## 1. Problem
 
@@ -172,4 +174,6 @@ I used Claude (Anthropic) as a design and analysis assistant throughout Part 1. 
 - **Spec review.** It checked the simulator specification against the camera parameters and found that the stated 90° vertical field of view is actually the horizontal one.
 - **Architecture refinement.** It helped me turn my ideas into a coherent high-level architecture. It suggested replacing full SLAM with a lighter design, having the memory recall *place* rather than *action*, and making the learned corner CNN a stretch goal. It also drew the architecture diagram.
 - **Research question comparison.** It compared my memory-based research question with a more standard classical-vs-CNN detector comparison, which helped me see that my idea was more original and better matched the failures in my data. It also suggested two improvements: uncertainty weighting for recall, and a measurable re-acquisition metric.
+
+# Semester project (Part 2): Data acquisition and preparation**
 
