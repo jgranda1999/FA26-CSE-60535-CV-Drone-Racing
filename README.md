@@ -175,5 +175,186 @@ I used Claude (Anthropic) as a design and analysis assistant throughout Part 1. 
 - **Architecture refinement.** It helped me turn my ideas into a coherent high-level architecture. It suggested replacing full SLAM with a lighter design, having the memory recall *place* rather than *action*, and making the learned corner CNN a stretch goal. It also drew the architecture diagram.
 - **Research question comparison.** It compared my memory-based research question with a more standard classical-vs-CNN detector comparison, which helped me see that my idea was more original and better matched the failures in my data. It also suggested two improvements: uncertainty weighting for recall, and a measurable re-acquisition metric.
 
-# Semester project (Part 2): Data acquisition and preparation**
 
+
+# Semester project (Part 2): Data acquisition and preparation
+
+# Part 2: Data Acquisition and Preparation
+
+> **Status.** All 150 simulator runs have been collected. Only one, `run_20260731_004531`, has been analyzed so far (Appendix A). Every figure below comes from that run, the simulator spec or the UZH FPV website. Dataset-wide statistics have not been computed yet; P2.5 lists the steps that will produce them.
+
+## P2.1 Sources
+
+**Primary: AI Grand Prix simulator logs (collected by the author).**
+
+- 150 Training-mode runs from the AI Grand Prix virtual qualifier simulator (spec VADR-TS-003, issue 00.03).
+- Recorded with our own logger, which captures the MAVLink telemetry and the UDP camera stream.
+- Each run contains `frames/*.jpg`, `frames.csv`, `imu.csv` and `race_status.csv` (Appendix A.1).
+- Not public.
+
+**Secondary: UZH FPV Drone Racing Dataset.**
+
+- Link: [https://fpv.ifi.uzh.ch/](https://fpv.ifi.uzh.ch/)
+- Paper: J. Delmerico, T. Cieslewski, H. Rebecq, M. Faessler, D. Scaramuzza, "Are We Ready for Autonomous Drone Racing? The UZH-FPV Drone Racing Dataset," *ICRA 2019*.
+- License: CC BY-NC-SA 3.0.
+- Use: tuning and testing the state filter (EKF) on real IMU noise with ground truth.
+
+**Not used as data: DroNet** (Loquercio et al., *IEEE RA-L* 2018). It is related work only (Part 1, §5); its car and bicycle datasets contain no race gates.
+
+## P2.2 Current state of the data
+
+**Known from the analyzed run** (Appendix A):
+
+- The run contains four attempts. Each passed gate 0, then crashed while turning toward gate 1.
+- 916 of 1,360 camera frame IDs were received, so about 33% of frames were lost in the logger.
+- New IMU samples arrive at about 36 Hz. Most logged rows repeat stale samples.
+- The streams use different clocks. Only `rx_wall` is shared by all of them.
+- No pose, attitude or gate-position ground truth was logged.
+- The accelerometer at rest implies an ~18° tilt.
+- The camera stream stopped during attempt 4, while the IMU and race status kept logging.
+
+**Believed about the other 149 runs** (to be verified):
+
+- Same file format and the same logger defects.
+- Some runs reached gates 2–3; none reached further.
+- The runs were flown with **different controller and CV pipeline versions**, because both were being iterated during collection. The runs are therefore not independent flights of one fixed system.
+
+**Unknown until profiled:**
+
+- Total attempts and frames.
+- How many runs or attempts are unusable.
+- Frames per gate.
+- The date range and number of distinct pipeline versions.
+- Whether logger defects vary across versions.
+- Whether Training mode publishes pose or attitude messages at all.
+
+
+
+## P2.3 How the data will be used
+
+
+| Component (Part 1 architecture)        | Data used                                                                           | Split role                                                   |
+| -------------------------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| HSV + shape gate detector              | Frames with annotated inner-gate corners                                            | Tune on train, evaluate on validation                        |
+| PnP gate pose                          | Annotated inner corners + known gate size, as pose pseudo-ground truth              | Evaluate on validation                                       |
+| Course memory                          | Train-run frames → embeddings, labeled from `race_status` (active gate, pass times) | Memory built from train only; queried with validation frames |
+| Recall uncertainty                     | Match distances from validation queries against the train memory                    | Calibrate on validation                                      |
+| EKF                                    | Sim IMU + detections + recall; UZH FPV IMU + ground truth for noise parameters      | UZH split in P2.4                                            |
+| Ablations (detection / recall / fused) | Offline replay of logged runs                                                       | Development on validation; final on test                     |
+| Closed-loop gates passed               | **New flights** with the Part 4 system                                              | Not from these logs (they reflect old controllers)           |
+
+
+
+
+## P2.4 Split plan
+
+The split has not been run yet.
+
+- **Unit: whole runs.** Individual frames or attempts are never split, because neighboring frames are nearly identical.
+- **Target: 90 / 30 / 30 runs (60 / 20 / 20).** This revises Part 1's 105 / 22 / 23 so that validation and test hold enough of the rare runs that reached gates 2–3.
+- **Stratified by pipeline era × deepest gate reached,** so every split contains every era and every depth.
+- **Frozen test set.** The split comes from a seeded script. Test run IDs are recorded with checksums and stay untouched until Part 5.
+
+**Expected differences between splits that matter here:**
+
+- **Same course, different flights.** Every split flies the identical course, which course memory depends on. The splits differ in trajectories, controller versions and crash points, not in the scene.
+- **Recall on unseen flights.** Validation flights are unseen and flown differently, so they test whether recall matches *place* rather than replaying a stored trajectory. Because memory labels describe place, not action, they do not depend on which controller flew.
+- **Depth.** Frames near gates 2–3 are rare, so stratification is what allows recall and re-acquisition to be evaluated beyond gate 1.
+- **Logger defects.** Frame loss and IMU staleness come from the logger, not the scene. The profiler will check that they are balanced across splits.
+
+**UZH FPV split.** All sequences are forward-facing with public ground truth; figures are from the dataset page.
+
+
+| Split        | Sequences              | Duration (s)           | v_max (m/s)         | Rationale                       |
+| ------------ | ---------------------- | ---------------------- | ------------------- | ------------------------------- |
+| Tune (train) | Indoor fwd 3, 5, 9, 10 | 54.6, 50.0, 34.0, 33.4 | 9.5, 4.9, 11.4, 9.5 | Moderate speed                  |
+| Validation   | Indoor fwd 6, 7        | 32.9, 73.2             | 12.5, 12.8          | Faster, same environment        |
+| Test         | Outdoor fwd 1, 3, 5    | 49.6, 92.8, 22.2       | 8.6, 14.0, 20.7     | New environment, highest speeds |
+
+
+
+
+## P2.5 Steps to make the data usable
+
+1. **Inventory.** Check that every run folder has all four files, that the CSVs parse and that the JPEGs decode. List broken runs.
+2. **Batch profiler →** `runs_manifest.csv`**.** Generalize the Appendix A analysis to all runs. For each attempt (segmented at sim resets), record:
+  - frame count and frame loss;
+  - the rate of new IMU samples;
+  - the deepest gate reached and the race time at the gate-0 pass;
+  - the gravity vector at rest;
+  - whether the camera stream stopped early.
+3. **Era and session tagging.**
+  - Take each run's start time from `rx_wall`, cross-checked against the folder-name timestamp (local time, UTC+1).
+  - **Era:** the last git commit touching controller or CV code before the run started, using author dates. Eras are approximate because some runs used uncommitted changes.
+  - **Session:** a group of consecutive runs with no gap longer than about 30 minutes.
+  - Spot-check a few runs by hand.
+4. **Exclusion rules.** Set thresholds after looking at the profiler distributions, but before splitting and before any model results. Examples: minimum frames per attempt, maximum frame loss, camera stopped early. Report how many runs and attempts are removed.
+5. **Cleaning.**
+  - De-duplicate IMU rows on `time_usec`.
+  - Assign an attempt ID to every row.
+  - Estimate per-attempt clock offsets against `rx_wall`.
+  - Store cleaned data in a standard per-attempt format that the replay harness loads.
+6. **Split.** Run the seeded, stratified split, write the split files and freeze the test set.
+7. **Labels.**
+  - **Course memory (automatic):** active gate, gate-pass times and time-to-next-pass for each frame, from `race_status`.
+  - **Visibility (semi-automatic):** full, partial or no gate. Pre-filled by the HSV detector, then corrected by hand.
+  - **Corners (manual):** inner-gate corners on keyframes. Validation comes first, then a small training subset for tuning the detector. The first frame after each gate reappears is also labeled, for the re-acquisition metric. Test runs are annotated only before Part 5.
+  - **Pose pseudo-ground truth:** PnP on the annotated corners, using the known gate size.
+8. **Logger audit capture.** Record one new run that logs every MAVLink message type. This settles whether pose or attitude is available in Training mode. If it is, record a small supplementary set with real ground truth to check the PnP pseudo-ground truth against.
+9. **Resolve the gravity tilt.** Determine whether the drone spawns tilted or the IMU axes differ from the body frame, before the EKF uses gravity.
+10. **UZH FPV preparation.** Download the text-format (ZIP) sequences listed in P2.4 and their calibration files. Load the IMU and ground truth into the same format the EKF test harness uses.
+
+
+
+## P2.6 Composition (to be reported)
+
+The objects are the **race gates**. The course has about 20 gates; the logs are expected to contain only gates 0–3. Frames with no gate visible, from turns and crashes, are kept as negatives. After steps 2–7, the report will give:
+
+- runs, attempts and frames after exclusion, overall and per split;
+- for each gate: attempts reaching it, frames as the active gate, frames visible (full or partial) and annotated keyframes;
+- the number of frames with no gate visible;
+- the number of eras and sessions, and runs per era.
+
+In the analyzed run, gate 0 was the active gate in all four attempts and gate 1 became active after each gate-0 pass. Gate 1 was never passed.
+
+## P2.7 Sample properties
+
+**Simulator logs** (measured on the analyzed run unless marked "spec"):
+
+
+| Property     | Value                                                                                                                         |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| Camera       | Single forward-facing RGB, 640×360 JPEG (~68 KB median)                                                                       |
+| Intrinsics   | fx = fy = 320 px; HFoV 90°, VFoV ≈ 58.7°. The spec's stated 90° VFoV is actually the horizontal FoV.                          |
+| Frame rate   | ~31 Hz produced (32 ms period); ~33% lost by the logger                                                                       |
+| IMU          | 3-axis accelerometer and gyroscope, ~36 Hz new samples; `time_usec` resets every attempt                                      |
+| Race status  | ~4 Hz: active gate, race start, last gate-pass time                                                                           |
+| Ground truth | None logged                                                                                                                   |
+| Scene        | Rendered indoor hangar: dark background, lit ceiling grid, pillars; synthetic lighting                                        |
+| Gates        | Orange-red square frames with printed text, logos and gate ID; clean inner edge                                               |
+| Distractors  | Up to ~5 gates visible at once, cyan raceline and its floor reflections, yellow glow beneath gates, start lights, red signage |
+
+
+**UZH FPV** (from the dataset page):
+
+- Real quadrotor flights by an expert pilot, indoors (hangar) and outdoors, with natural lighting.
+- Sensors: mDAVIS (frames, events, IMU) and Snapdragon Flight (camera, IMU).
+- Ground truth: Leica total station.
+- Calibration: Kalibr camera intrinsics and camera–IMU extrinsics.
+
+
+
+## P2.8 Risks and open questions
+
+- **No pose ground truth.** If Training mode exposes no pose, evaluation relies on corner annotations and PnP pseudo-ground truth. Pose error is then measured against an estimate, not the true pose.
+- **Approximate eras.** Uncommitted changes blur version boundaries. Stratification by session limits the damage.
+- **Shallow coverage.** Memory and evaluation cover only the first few of about 20 gates. Deeper course sections fall back to detection only.
+- **Logger defects.** If frame loss or IMU staleness differ by era, they confound comparisons across eras. The profiler checks this.
+- **Annotation effort.** Corner labeling is the largest manual cost. It is limited to keyframes and prioritized for validation.
+- **Sim-to-real gap.** UZH FPV tests the EKF on real IMU noise, but its camera, scene and dynamics differ from the simulator's.
+
+
+
+## P2.9 Use of generative AI (Part 2)
+
+Claude (Anthropic) analyzed the example run (Appendix A) and helped draft this plan. It suggested era and session tagging, depth-stratified splits and the preparation steps. I made the decisions on splits, exclusion rules and annotation. No statistics for the full dataset have been computed yet.
