@@ -358,3 +358,78 @@ In the analyzed run, gate 0 was the active gate in all four attempts and gate 1 
 ## P2.9 Use of generative AI (Part 2)
 
 Claude (Anthropic) analyzed the example run (Appendix A) and helped draft this plan. It suggested era and session tagging, depth-stratified splits and the preparation steps. I made the decisions on splits, exclusion rules and annotation. No statistics for the full dataset have been computed yet.
+
+
+---
+
+
+
+# Semester project (Part 3): First solution
+
+# Part 3: First Solution — Classical Gate Detector + PnP Pose
+
+> **Status.** This part implements the *live perception* half of the Part 1 architecture (the teal boxes in the diagram): the color-and-shape gate detector, a raceline look-ahead cue, and PnP gate pose. This is the Part 3 milestone from the plan in §7, "classical detector + PnP evaluated offline." The course-memory research component (recall, EKF fusion) and the learned-corner CNN stretch goal are deliberately left for Part 4. All code is in [`code/`](code/) and runs on the sample run shipped in [`sample-data/`](sample-data/). Everything below was produced by running that code on `run_20260731_004531`.
+
+## P3.1 Implemented methods *(deliverable 1)*
+
+The pipeline is **classical and training-free**: nothing is learned, so there are no model weights. It maps directly onto the course material in §6 (color segmentation, morphology, edges/contours, projective geometry). Stages, one module each under [`code/dronevision/`](code/dronevision/):
+
+1. **Data preprocessing — `preprocessing.py`.** Loads a logged run from a `.zip` or a folder, parses `frames.csv` and `race_status.csv`, sorts frames by `sim_time_ns`, adds a relative-time column, and joins each frame to its active-gate label. It also holds the camera model from the spec (`fx=fy=320`, `cx,cy=320,180`, no distortion) and the HSV thresholds.
+2. **Color segmentation — `preprocessing.gate_color_mask`.** Converts BGR→HSV and thresholds the saturated **orange-red** gate frame. Because red straddles the hue wrap-around, two hue bands (`0–14` and `166–179`) are OR-ed. A morphological **close** seals the thin gate border where printed text, logos and the gate ID interrupt it; an **open** removes speckle (signage, start lights). A parallel `raceline_color_mask` thresholds the **cyan** ribbon.
+3. **Gate detection — `detector.py`.** Runs `findContours` with `RETR_CCOMP` so each red blob is returned as an outer contour (the gate *frame*) plus its holes. For every sufficiently large frame it takes the largest hole — the enclosed **inner square** — and fits a rotated rectangle (`minAreaRect`) to get four ordered corners (TL, TR, BR, BL). Candidates are shape-filtered on aspect ratio (≤ 1.8) and rectangularity (≥ 0.60) and scored by `inner_area × rectangularity / aspect_ratio`, so the top-ranked detection is the biggest, squarest, most-rectangular gate — the pipeline's guess at the **next** gate.
+4. **Raceline look-ahead — `raceline.py`.** Keeps the largest cyan component in the lower image, fits a line with `cv2.fitLine`, and returns a heading plus the signed horizontal offset of the ribbon at the image bottom (a crude steer-left/right cue for when the next gate is small or off-screen).
+5. **Gate pose by PnP — `pose.py`.** The inner square is a planar object of **known metric size (1.5 m, spec §3.7)**, so four image corners are solved with `cv2.solvePnP(SOLVEPNP_IPPE_SQUARE)` against the camera intrinsics. It reports range (‖t‖), bearing, elevation, and the mean reprojection error as a self-consistency score.
+6. **Visualization + runner — `visualize.py`, `run_part3.py`.** Draw overlays, build the figures below, write a per-frame `results.csv`, and print a summary.
+
+## P3.2 Justification *(deliverable 2)*
+
+**Why color segmentation first.** Appendix A established the single strongest fact about this scene: the gates are a saturated orange-red against an almost colorless gray hangar, and the raceline is bright cyan. Part 1 §4 lists hue as "the strongest cue available." A hue threshold is therefore the highest-signal, lowest-cost first filter — it discards almost the entire background in one pass, is invariant to the brightness changes and JPEG artifacts noted as required invariances, and needs no training data, which matters because corner annotations do not exist yet (Part 2). The two-band red threshold is forced by OpenCV's hue wrap-around; the close-then-open morphology is forced by the specific defect visible in `hsv_baseline.jpg` — printed text and checker patterns punch holes in the gate border, so without closing it the inner square is not an enclosed region.
+
+**Why contour hierarchy and the inner square, not edges+Hough.** A gate is topologically a square annulus. `RETR_CCOMP` recovers exactly that frame/hole structure for free, so the inner boundary — which Appendix A.3 identified as the *clean* PnP target (the outer border carries logos and text) — falls out directly as a hole. The classic alternative, Canny + Hough lines, was rejected: Hough would fire on the dozens of straight lines in this scene (ceiling grid, pillars, floor markings, signage) and then require fragile line-grouping to reassemble a quadrilateral, whereas color already isolates the gate so that a contour *is* the gate. `minAreaRect` rather than a strict 4-point `approxPolyDP` is used because text and the checker pattern nibble the inner edge; the rotated rectangle still yields four well-posed corners where the polygon test would reject the frame outright, and it tolerates the drone roll and partial occlusion listed as invariances.
+
+**Why PnP on a known square.** The one piece of hard metric knowledge available is the gate's 1.5 m inner size, and the camera is a calibrated distortion-free pinhole. Four coplanar corners of a known square are the textbook input to `IPPE_SQUARE`, which is both fast and unambiguous for planar targets. This converts a pixel detection into the metric range/bearing the downstream EKF and controller actually need, and — crucially while there is no pose ground truth — its reprojection error gives a per-frame confidence that is exactly the uncertainty signal the Part 1 fusion design calls for. The raceline cue is included because Part 1 relies on it for look-ahead when the next gate is off-screen, which Appendix A showed is precisely where every attempt crashed.
+
+## P3.3 Results and commentary *(deliverable 3)*
+
+All three figures below were generated by `run_part3.py` on the sample run (916 frames, four crash-and-restart attempts).
+
+**Pipeline, stage by stage.** The panel shows one frame through all four stages: input → HSV+morphology mask (gate isolated, background gone, two neighboring gates and a speck of signage surviving) → contours (amber = gate frame, green = inner hole) → the selected gate's inner corners with its PnP range and bearing. The green quad sits cleanly on the inner edge, which is why the pose is accurate.
+
+![Part 3 pipeline stages](figures/part3_pipeline.jpg)
+
+**Detection gallery across the run.** Green is the selected next gate, amber any secondary gate, magenta the inner corners, cyan the raceline heading, and each tile prints the PnP range/bearing. The detector tracks gate 0 from ~10 m down to point-blank, correctly prefers the nearer gate when two are visible, and recovers corners even on the extreme close-up where the "AI-GP" sign fills the frame. The empty tiles (`gates: 0`) are the turning/crash phase after gate 0, where the next gate is off-screen — exactly the failure mode Part 1 is designed to fix with course memory, and where the raceline arrow is the only remaining cue.
+
+![Part 3 detection gallery](figures/part3_detections.jpg)
+
+**Quantitative sanity check without labels.** Pose ground truth was never logged (Appendix A.3), so I validate PnP against physics instead. Plotting PnP range to the selected gate against time, colored by the active gate, reveals the same repeatable structure in all four attempts: while gate 0 is active (blue) the range starts near **10 m**, holds as the drone lines up, then falls to a **closest approach of 1.5–3.0 m** right at the pass; immediately afterward gate 1 (red) is re-acquired at a **larger ~17 m** range and closes until the crash. This monotone approach-then-re-acquire pattern, repeated four times, is strong evidence the metric scale is right even without annotations.
+
+![Part 3 PnP range vs time](figures/part3_range_vs_time.png)
+
+**Numbers (from `results.csv`).** Over the 556 frames where gate 0 is the active target, the detector fires on **89.9%**. Median PnP **reprojection error is 0.34 px** (mean 0.77, 90th-percentile 1.16) — sub-pixel, confirming the four corners are geometrically consistent with a 1.5 m square. Detection drops to **26.9%** while gate 1 is active: that phase is dominated by the off-screen-gate crash, so the low rate is a property of the flight, not a detector failure, and it quantifies the gap the Part 1 recall component must close. Overall mean is 0.68 gates/frame (max 2). The closest approach never reaches 0 m because at point-blank the inner square overflows the frame and its hole opens to the border; that, plus edge gates, is the main residual limitation.
+
+## P3.4 How to run it *(deliverable 2: runnable code + sample file)*
+
+A sample run is included at [`sample-data/run_20260731_004531.zip`](sample-data/) (the Appendix A run). From the repo root:
+
+```bash
+cd code
+pip install -r requirements.txt
+python run_part3.py --input ../sample-data/run_20260731_004531.zip --outdir out
+```
+
+This writes `out/results.csv` and the three figures above (`fig_pipeline.jpg`, `fig_detections.jpg`, `fig_range_vs_time.png`) and prints the summary. `--save-frames` additionally dumps every annotated frame. The runner accepts either the `.zip` or an extracted run folder. Full details and a library-usage snippet are in [`code/README.md`](code/README.md).
+
+## P3.5 Limitations and next steps
+
+- **Point-blank and edge gates.** The inner-hole method fails when the gate overflows the frame; a fallback using the outer border (also a known 2.7 m square) or accepting border-touching quads is planned.
+- **"Next gate" is a heuristic.** Selection is by size/shape, not yet reconciled with the `active_gate_index` label; Part 4 will fuse this with recall and the EKF.
+- **Thresholds are hand-tuned on one run.** They must be checked across the pipeline eras once the Part 2 batch profiler runs; the thresholds are centralized in `preprocessing.py` for exactly this.
+- **Pose is pseudo-ground-truth.** Validation is physics-based (P3.3) until corner annotations exist; those will give true gate-localization error.
+
+## P3.6 Model weights
+
+This part is entirely classical, so **no model weights are produced or uploaded** — the note about hosting weights on Google Drive does not apply yet. When the Part 4 learned-corner CNN (stretch goal) is trained, its weights will be hosted on Google Drive with access granted to Adam and the link added here, following the [EyePreserve](https://github.com/CVRL/EyePreserve) example, rather than pushed to GitHub.
+
+## P3.7 Use of generative AI (Part 3)
+
+Claude (Anthropic) helped implement and document this part. **My contributions:** I set the scope (classical detector + PnP for Part 3, memory/EKF deferred), chose the inner square as the PnP target and the hue-first strategy based on my Appendix A analysis, and decided to validate pose against the physics of the approach since no ground truth exists. **How AI was used:** it wrote the `dronevision` modules and `run_part3.py` to my design, tuned the HSV/morphology/shape thresholds against frames from the sample run, pulled the gate geometry (1.5 m) and intrinsics from the simulator spec, and generated the three figures and the metrics in P3.3. I reviewed the code and the figures and confirmed the reported numbers against `results.csv`.
